@@ -20,7 +20,7 @@ app.add_middleware(
 
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 # gemma2-9b-it: 15,000 TPM on free tier — handles long transcripts
-MODEL = "llama-3.3-70b-versatile"
+MODEL = "gemma2-9b-it"
 # Max characters to send per request (~8k tokens worth, safe buffer)
 MAX_TRANSCRIPT_CHARS = 12000
 
@@ -147,6 +147,44 @@ async def run_pipeline(req: PipelineRequest):
         "intent_used": intent_set,
         "truncated": was_truncated,
     }
+
+
+class IntentRequest(BaseModel):
+    raw: str  # anything the user pastes — caption, title, description, rough notes
+
+
+@app.post("/api/build-intent")
+async def build_intent(req: IntentRequest):
+    if not req.raw.strip():
+        raise HTTPException(status_code=400, detail="Please provide some context")
+
+    system = (
+        "You are a campaign intent writer for a social media content team. "
+        "Given rough notes, a video caption, a title, or any short description, "
+        "you write a structured campaign intent document that will be used to guide AI agents "
+        "in selecting and scoring short-form video clips (Reels/Shorts). "
+        "Always write in plain text with clear sections. Never use JSON. Never use markdown headers with #."
+    )
+
+    user = (
+        f"Here is what the user gave me:\n\n{req.raw.strip()}\n\n"
+        "Based on this, write a structured campaign intent with these exact sections:\n\n"
+        "Who you are:\n"
+        "(Describe the company or team posting this content)\n\n"
+        "About this video:\n"
+        "(Describe the video, who is speaking, their role, and what they are discussing)\n\n"
+        "What we want:\n"
+        "(List 3-5 bullet points of the types of moments, themes, or clips to look for)\n\n"
+        "What to avoid:\n"
+        "(List 2-4 bullet points of topics, tones, or content types to exclude)\n\n"
+        "Write only the intent document. No preamble, no explanation."
+    )
+
+    try:
+        result = call_groq(system, user)
+        return {"intent": result.strip()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Intent builder failed: {str(e)}")
 
 
 @app.get("/health")
