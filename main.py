@@ -161,45 +161,37 @@ async def build_intent(req: IntentRequest):
     system = (
         "You are a campaign intent writer for a social media content team. "
         "Given rough notes, a video caption, a title, or any short description, "
-        "you write a structured campaign intent document that will be used to guide AI agents "
-        "in selecting and scoring short-form video clips (Reels/Shorts). "
-        "Always write in plain text with clear sections. Never use JSON. Never use markdown headers with #."
+        "you write a structured campaign intent document. "
+        "Always write in plain text with clear sections. Never use JSON."
     )
 
     user = (
-        f"Here is what the user gave me:\n\n{req.raw.strip()}\n\n"
-        "Based on this, write a structured campaign intent with these exact sections:\n\n"
+        f"Here is the context:\n\n{req.raw.strip()}\n\n"
+        "Write a campaign intent document with these sections:\n\n"
         "Who you are:\n"
-        "(Describe the company or team posting this content)\n\n"
         "About this video:\n"
-        "(Describe the video, who is speaking, their role, and what they are discussing)\n\n"
         "What we want:\n"
-        "(List 3-5 bullet points of the types of moments, themes, or clips to look for)\n\n"
-        "What to avoid:\n"
-        "(List 2-4 bullet points of topics, tones, or content types to exclude)\n\n"
-        "Write only the intent document. No preamble, no explanation."
+        "What to avoid:\n\n"
+        "Write only the intent document, no explanation."
     )
 
     try:
-        # Use llama3 for intent building — faster and more reliable for text generation
         response = client.chat.completions.create(
-            model="llama3-8b-8192",
+            model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
             temperature=0.5,
-            max_tokens=800,
+            max_tokens=600,
         )
         result = response.choices[0].message.content
         return {"intent": result.strip()}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Intent builder failed: {str(e)}")
+        import traceback
+        tb = traceback.format_exc()
+        raise HTTPException(status_code=500, detail=f"{str(e)} | TRACE: {tb}")
 
-
-@app.get("/health")
-def health():
-    return {"status": "ok", "model": MODEL}
 
 @app.get("/health")
 def health():
