@@ -20,7 +20,7 @@ app.add_middleware(
 
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 # gemma2-9b-it: 15,000 TPM on free tier — handles long transcripts
-MODEL = "gemma2-9b-it"
+MODEL = "llama-3.1-8b-instant"
 # Max characters to send per request (~8k tokens worth, safe buffer)
 MAX_TRANSCRIPT_CHARS = 12000
 
@@ -191,6 +191,11 @@ async def build_intent(req: IntentRequest):
         import traceback
         tb = traceback.format_exc()
         raise HTTPException(status_code=500, detail=f"{str(e)} | TRACE: {tb}")
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "model": MODEL}
 
 
 @app.get("/health")
