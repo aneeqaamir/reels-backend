@@ -181,11 +181,25 @@ async def build_intent(req: IntentRequest):
     )
 
     try:
-        result = call_groq(system, user)
+        # Use llama3 for intent building — faster and more reliable for text generation
+        response = client.chat.completions.create(
+            model="llama3-8b-8192",
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=0.5,
+            max_tokens=800,
+        )
+        result = response.choices[0].message.content
         return {"intent": result.strip()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Intent builder failed: {str(e)}")
 
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "model": MODEL}
 
 @app.get("/health")
 def health():
