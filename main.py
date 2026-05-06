@@ -18,7 +18,7 @@ app.add_middleware(
 
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 MODEL = "llama-3.1-8b-instant"
-CHUNK_SIZE = 7000  # chars per chunk — safe under 6000 TPM limit
+CHUNK_SIZE = 7000
 
 
 class PipelineRequest(BaseModel):
@@ -28,7 +28,6 @@ class PipelineRequest(BaseModel):
 
 
 def chunk_transcript(text: str) -> list[str]:
-    """Split transcript into chunks at newline boundaries."""
     chunks = []
     while len(text) > CHUNK_SIZE:
         cut = text[:CHUNK_SIZE].rfind("\n")
@@ -42,7 +41,6 @@ def chunk_transcript(text: str) -> list[str]:
 
 
 def clean_json(raw: str) -> list:
-    """Strip markdown fences and parse JSON array."""
     cleaned = re.sub(r"```json|```", "", raw).strip()
     match = re.search(r"\[.*\]", cleaned, re.DOTALL)
     if not match:
@@ -80,7 +78,10 @@ async def run_pipeline(req: PipelineRequest):
     shortlist_system = (
         "You are a social media content strategist specialising in short-form video (Reels/Shorts). "
         "You identify high-performing clip moments from real transcripts. "
-        "You ALWAYS use exact timestamps found in the provided transcript — never invent timestamps. "
+        "You ALWAYS use exact timestamps found in the provided transcript — never invent them. "
+        "For each moment, identify a start_time and end_time from the transcript. "
+        "The clip must be maximum 90 seconds long (1 minute 30 seconds). "
+        "Pick the end_time as the natural conclusion of the moment — where the point lands. "
         + ("You strictly respect the campaign intent. " if intent_set else "")
         + "Return ONLY a valid JSON array, no markdown, no explanation."
     )
@@ -92,18 +93,18 @@ async def run_pipeline(req: PipelineRequest):
             f"{intent_block}"
             f"This is part {i+1} of {len(chunks)} of the transcript:\n\n{chunk}\n\n"
             f"Find the {per_chunk} best moments for Reels from this section. "
-            f"Use EXACT timestamps from this transcript section.\n"
+            f"Use EXACT timestamps from this transcript section. Max clip length: 90 seconds.\n"
             + (
                 "Filter by campaign intent — only pick moments that align with what we want.\n"
                 if intent_set
                 else "Focus on: strong hooks, surprising facts, emotional moments, actionable tips.\n"
             )
             + '\nReturn ONLY a valid JSON array:\n'
-              '[{"timestamp":"exact timestamp","title":"Short punchy title","description":"Why this works as a reel","hook_type":"Hook/Insight/Story/Tip/Emotion","intent_match":true}]'
+              '[{"start_time":"exact start timestamp","end_time":"exact end timestamp","title":"Short punchy title","description":"Why this works as a reel","hook_type":"Hook/Insight/Story/Tip/Emotion","intent_match":true}]'
         )
         try:
             if i > 0:
-                time.sleep(2)
+                time.sleep(10)
             raw = call_groq(shortlist_system, chunk_user, max_tokens=1500)
             chunk_results = clean_json(raw)
             all_shortlisted.extend(chunk_results)
@@ -121,6 +122,7 @@ async def run_pipeline(req: PipelineRequest):
             if intent_set
             else "Score by virality potential. "
         )
+        + "Each clip has a start_time and end_time — preserve these exactly. "
         + "Return ONLY a valid JSON array sorted by score descending, no markdown."
     )
 
@@ -128,20 +130,20 @@ async def run_pipeline(req: PipelineRequest):
 
     prioritize_user = (
         f"{intent_block}"
-        f"Here are the shortlisted reel moments from the full transcript:\n{json.dumps(candidates, indent=2)}\n\n"
-        f"Score and rank each from 1-10. Return the top {n} items ranked by score. "
+        f"Here are the shortlisted reel moments:\n{json.dumps(candidates, indent=2)}\n\n"
+        f"Score and rank each from 1-10. Return the top 15 items ranked by score. "
         + (
-            "Your scoring MUST factor in campaign intent — matching moments score higher. "
+            "Scoring MUST factor in campaign intent — matching moments score higher. "
             if intent_set else ""
         )
         + "Also consider: watch-through likelihood, shareability, emotional resonance.\n\n"
           'Return ONLY a valid JSON array sorted by score descending:\n'
-          '[{"timestamp":"...","title":"...","description":"...","hook_type":"...","intent_match":true,"score":9,"why":"One sentence reason"}]'
+          '[{"start_time":"...","end_time":"...","title":"...","description":"...","hook_type":"...","intent_match":true,"score":9,"why":"One sentence reason"}]'
     )
 
     try:
-        time.sleep(2)
-        prioritize_raw = call_groq(prioritize_system, prioritize_user, max_tokens=2000)
+        time.sleep(10)
+        prioritize_raw = call_groq(prioritize_system, prioritize_user, max_tokens=2500)
         prioritized = clean_json(prioritize_raw)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Agent 2 failed: {str(e)}")
