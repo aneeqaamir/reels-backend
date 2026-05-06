@@ -1,11 +1,9 @@
 import os
 import json
-from dotenv import load_dotenv
-load_dotenv()
 import re
+import time
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from groq import Groq
 
@@ -13,46 +11,46 @@ app = FastAPI(title="Reels Engine API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten to your domain in production
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-# gemma2-9b-it: 15,000 TPM on free tier — handles long transcripts
 MODEL = "llama-3.1-8b-instant"
-# Max characters to send per request (~8k tokens worth, safe buffer)
-MAX_TRANSCRIPT_CHARS = 12000
+CHUNK_SIZE = 7000  # chars per chunk — safe under 6000 TPM limit
 
 
 class PipelineRequest(BaseModel):
     transcript: str
     intent: str = ""
-    reels_count: int = 10  # how many reels the user wants
+    reels_count: int = 10
 
 
-def truncate_transcript(text: str) -> tuple[str, bool]:
-    """Trim transcript to safe size. Returns (text, was_truncated)."""
-    if len(text) <= MAX_TRANSCRIPT_CHARS:
-        return text, False
-    # Cut at a newline boundary so we don't chop mid-sentence
-    cut = text[:MAX_TRANSCRIPT_CHARS].rfind("\n")
-    if cut == -1:
-        cut = MAX_TRANSCRIPT_CHARS
-    return text[:cut], True
+def chunk_transcript(text: str) -> list[str]:
+    """Split transcript into chunks at newline boundaries."""
+    chunks = []
+    while len(text) > CHUNK_SIZE:
+        cut = text[:CHUNK_SIZE].rfind("\n")
+        if cut == -1:
+            cut = CHUNK_SIZE
+        chunks.append(text[:cut].strip())
+        text = text[cut:].strip()
+    if text:
+        chunks.append(text)
+    return chunks
 
 
 def clean_json(raw: str) -> list:
     """Strip markdown fences and parse JSON array."""
     cleaned = re.sub(r"```json|```", "", raw).strip()
-    # Find first [ ... ] block
     match = re.search(r"\[.*\]", cleaned, re.DOTALL)
     if not match:
         raise ValueError("No JSON array found in response")
     return json.loads(match.group())
 
 
-def call_groq(system: str, user: str) -> str:
+def call_groq(system: str, user: str, max_tokens: int = 2000) -> str:
     response = client.chat.completions.create(
         model=MODEL,
         messages=[
@@ -60,7 +58,7 @@ def call_groq(system: str, user: str) -> str:
             {"role": "user", "content": user},
         ],
         temperature=0.4,
-        max_tokens=3000,
+        max_tokens=max_tokens,
     )
     return response.choices[0].message.content
 
@@ -70,87 +68,94 @@ async def run_pipeline(req: PipelineRequest):
     if not req.transcript.strip():
         raise HTTPException(status_code=400, detail="Transcript is required")
 
-    transcript, was_truncated = truncate_transcript(req.transcript)
-
+    chunks = chunk_transcript(req.transcript)
     intent_block = (
-        f"\n\n--- CAMPAIGN INTENT & CONTEXT ---\n{req.intent.strip()}\n--- END INTENT ---\n"
-        if req.intent.strip()
-        else ""
+        f"\n\n--- CAMPAIGN INTENT ---\n{req.intent.strip()}\n--- END INTENT ---\n"
+        if req.intent.strip() else ""
     )
     intent_set = bool(req.intent.strip())
-    n = max(5, min(req.reels_count, 20))  # clamp between 5 and 20
-    # Agent 2 needs to return more items than requested so user sees full ranking
-    n_shortlist = n + 5
+    n = max(5, min(req.reels_count, 20))
+    per_chunk = max(3, (n + 5) // len(chunks) + 2)
 
-    # ── AGENT 1: Shortlist ──
     shortlist_system = (
         "You are a social media content strategist specialising in short-form video (Reels/Shorts). "
         "You identify high-performing clip moments from real transcripts. "
         "You ALWAYS use exact timestamps found in the provided transcript — never invent timestamps. "
-        + ("You strictly respect the campaign intent — filtering out irrelevant or unwanted content. " if intent_set else "")
+        + ("You strictly respect the campaign intent. " if intent_set else "")
         + "Return ONLY a valid JSON array, no markdown, no explanation."
     )
-    shortlist_user = (
-        f"{intent_block}"
-        f"Here is the YouTube transcript:\n\n{transcript}\n\n"
-        f"Identify exactly {n_shortlist} best moments for Facebook/Instagram Reels (15–60 second clips). "
-        f"You MUST return {n_shortlist} items — do not return fewer. "
-        f"Use EXACT timestamps from the transcript.\n"
-        + (
-            "IMPORTANT: Use the campaign intent above to filter moments. Only pick moments that align with what we want. Actively EXCLUDE topics listed as things to avoid.\n"
-            if intent_set
-            else "Focus on: strong hooks, surprising facts, emotional moments, actionable tips, relatable insights.\n"
+
+    # ── AGENT 1: Process each chunk ──
+    all_shortlisted = []
+    for i, chunk in enumerate(chunks):
+        chunk_user = (
+            f"{intent_block}"
+            f"This is part {i+1} of {len(chunks)} of the transcript:\n\n{chunk}\n\n"
+            f"Find the {per_chunk} best moments for Reels from this section. "
+            f"Use EXACT timestamps from this transcript section.\n"
+            + (
+                "Filter by campaign intent — only pick moments that align with what we want.\n"
+                if intent_set
+                else "Focus on: strong hooks, surprising facts, emotional moments, actionable tips.\n"
+            )
+            + '\nReturn ONLY a valid JSON array:\n'
+              '[{"timestamp":"exact timestamp","title":"Short punchy title","description":"Why this works as a reel","hook_type":"Hook/Insight/Story/Tip/Emotion","intent_match":true}]'
         )
-        + '\nReturn ONLY a valid JSON array:\n'
-          '[{"timestamp":"exact timestamp","title":"Short punchy title","description":"Why this works as a reel","hook_type":"Hook/Insight/Story/Tip/Emotion","intent_match":true}]'
-    )
+        try:
+            if i > 0:
+                time.sleep(2)
+            raw = call_groq(shortlist_system, chunk_user, max_tokens=1500)
+            chunk_results = clean_json(raw)
+            all_shortlisted.extend(chunk_results)
+        except Exception as e:
+            continue
 
-    try:
-        shortlist_raw = call_groq(shortlist_system, shortlist_user)
-        shortlisted = clean_json(shortlist_raw)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Agent 1 failed: {str(e)}")
+    if not all_shortlisted:
+        raise HTTPException(status_code=500, detail="Agent 1 failed: No moments found")
 
-    # ── AGENT 2: Prioritize ──
+    # ── AGENT 2: Rank all collected moments ──
     prioritize_system = (
         "You are a content prioritisation agent. You score and rank short-form video clips. "
         + (
-            "Intent alignment is a PRIMARY factor — clips matching stated goals rank higher, off-topic clips rank lower. "
+            "Intent alignment is a PRIMARY factor — clips matching stated goals rank higher. "
             if intent_set
             else "Score by virality potential. "
         )
         + "Return ONLY a valid JSON array sorted by score descending, no markdown."
     )
+
+    candidates = all_shortlisted[:30]
+
     prioritize_user = (
         f"{intent_block}"
-        f"Here are the shortlisted reel moments:\n{json.dumps(shortlisted, indent=2)}\n\n"
-        f"Score and rank each from 1–10. Return ALL {len(shortlisted)} items ranked, the user wants at least {n} reels. "
+        f"Here are the shortlisted reel moments from the full transcript:\n{json.dumps(candidates, indent=2)}\n\n"
+        f"Score and rank each from 1-10. Return the top {n} items ranked by score. "
         + (
-            "Your scoring MUST factor in the campaign intent — moments that align closely score higher, off-topic moments score lower. "
-            if intent_set
-            else ""
+            "Your scoring MUST factor in campaign intent — matching moments score higher. "
+            if intent_set else ""
         )
-        + "Also consider: watch-through likelihood, shareability, emotional resonance, comment/reaction potential.\n\n"
+        + "Also consider: watch-through likelihood, shareability, emotional resonance.\n\n"
           'Return ONLY a valid JSON array sorted by score descending:\n'
           '[{"timestamp":"...","title":"...","description":"...","hook_type":"...","intent_match":true,"score":9,"why":"One sentence reason"}]'
     )
 
     try:
-        prioritize_raw = call_groq(prioritize_system, prioritize_user)
+        time.sleep(2)
+        prioritize_raw = call_groq(prioritize_system, prioritize_user, max_tokens=2000)
         prioritized = clean_json(prioritize_raw)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Agent 2 failed: {str(e)}")
 
     return {
-        "shortlisted": shortlisted,
+        "shortlisted": all_shortlisted,
         "prioritized": prioritized,
         "intent_used": intent_set,
-        "truncated": was_truncated,
+        "chunks_processed": len(chunks),
     }
 
 
 class IntentRequest(BaseModel):
-    raw: str  # anything the user pastes — caption, title, description, rough notes
+    raw: str
 
 
 @app.post("/api/build-intent")
@@ -188,14 +193,7 @@ async def build_intent(req: IntentRequest):
         result = response.choices[0].message.content
         return {"intent": result.strip()}
     except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        raise HTTPException(status_code=500, detail=f"{str(e)} | TRACE: {tb}")
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok", "model": MODEL}
+        raise HTTPException(status_code=500, detail=f"Intent builder failed: {str(e)}")
 
 
 @app.get("/health")
