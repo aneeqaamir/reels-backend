@@ -100,7 +100,7 @@ async def run_pipeline(req: PipelineRequest):
                 else "Focus on: strong hooks, surprising facts, emotional moments, actionable tips.\n"
             )
             + '\nReturn ONLY a valid JSON array:\n'
-              '[{"start_time":"exact start timestamp","end_time":"exact end timestamp","title":"Short punchy title","description":"Why this works as a reel","hook_type":"Hook/Insight/Story/Tip/Emotion","intent_match":true}]'
+              '[{"timestamp":"exact start timestamp","start_time":"exact start timestamp","end_time":"exact end timestamp","title":"Short punchy title","description":"Why this works as a reel","hook_type":"Hook/Insight/Story/Tip/Emotion","intent_match":true}]'
         )
         try:
             if i > 0:
@@ -138,7 +138,7 @@ async def run_pipeline(req: PipelineRequest):
         )
         + "Also consider: watch-through likelihood, shareability, emotional resonance.\n\n"
           'Return ONLY a valid JSON array sorted by score descending:\n'
-          '[{"start_time":"...","end_time":"...","title":"...","description":"...","hook_type":"...","intent_match":true,"score":9,"why":"One sentence reason"}]'
+          '[{"timestamp":"...","start_time":"...","end_time":"...","title":"...","description":"...","hook_type":"...","intent_match":true,"score":9,"why":"One sentence reason"}]'
     )
 
     try:
